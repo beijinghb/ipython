@@ -15,40 +15,46 @@ def _format_addr(s): #格式化邮件信息
     name, addr = parseaddr(s)
     return formataddr((Header(name,'utf-8').encode(),addr))
 
+#@conf   邮件发送配置
+#@lock   锁
+#@queue  队列数据需包含2个元素(sendto,msg)
+#@errAccount  无法发送的邮件账号，需要传入变量名
+
 class Sender(threading.Thread): #发送邮件--线程类对象
-    def __init__(self):
+    def __init__(self,conf,lock,queue,errAccount):
+        self.conf=conf
+        self.lock=lock
+        self.q=queue
+        self.errAccount=errAccount
         super(Sender,self).__init__()
     def run(self):
-        global conf,q,errAccount
-        server = smtplib.SMTP(conf['smtp'], 25) # SMTP协议默认端口是25
-##        #server.set_debuglevel(1)
+        server = smtplib.SMTP(self.conf['smtp'], 25) # SMTP协议默认端口是25
+##        server.set_debuglevel(1)
         
         try: # 检测登录是否OK?
-            server.login(conf['from'], conf['pwd'])
+            server.login(self.conf['from'], self.conf['pwd'])
         except Exception as e:
-            lock.acquire()
+            self.lock.acquire()
             print(e)
-            lock.release()
+            self.lock.release()
         else:
             while True:
-                msg=q.get()
-                confto=msg[0]
+                data=self.q.get()
+                sendto=data[0]
+                msg=data[1]
                 
                 try:# 检测邮件发送是否OK?
-                    server.sendmail(conf['from'], msg[0], msg[1].as_string())
+                    server.sendmail(self.conf['from'], sendto, msg.as_string())
                 except Exception as e:
-                    lock.acquire()
-                    errAccount.append(msg[0])
-##                    print(e)
-                    lock.release()
+                    errAccount.append(sendto)
                 else:
-                    lock.acquire()
-                    print('%-2s%-30s%-25s%s'%("√",msg[0],time.time(),self.name))
-                    lock.release()
-                q.task_done() #告诉队列取数后的操作已完毕。
+                    self.lock.acquire()
+                    print('%-2s%-30s%-25s%s'%("√",sendto,time.time(),self.name))
+                    self.lock.release()
+                self.q.task_done() #告诉队列取数后的操作已完毕。
                 
             server.quit()
-            print("%s is empty"%self.name)
+            # print("%s is empty"%self.name)
             
         
         
@@ -62,7 +68,6 @@ def Ldump(*txt):
 
 def Msg_encode(conf,th,i,td):
     # print("td=",td)
-    conf['to']=td[0]
     content=html_head+"<table>"
     content+=th+td[2]
     content+="</table>"+html_end
@@ -70,24 +75,20 @@ def Msg_encode(conf,th,i,td):
     msg['From'] = _format_addr('财务 <%s>' % conf['from'])
     msg['To'] = _format_addr('%s <%s>' %(td[1],td[0]))
     msg['Subject'] = Header(conf['subject'], 'utf-8').encode()
-    return conf['to'],msg
+    return td[0],msg
     
 
-
-
-def getConf():
-    pass
-
 def htmlFile(th,d):
-    print("htmlFile: th=",th)
-    fname=r"d:\0701.html"
+    # print("htmlFile: th=",th)
+    fname=r"payroll.html"
     if os.path.exists(fname):
         os.remove(fname) 
     with open(fname,'w') as f:
         content=html_head+"<table>"
         for k in d:
             for x in d[k]:
-                content+=th[2]+x[2]+"</table>"+x[0]+"<table>"
+                check='''<caption class='msg'>TO:%s-%s<input type="checkbox" style="vertical-align:middle;" ></caption>'''%(x[0],k)
+                content+=check+th[2]+x[2]+"</table><br/><br/><table>"
         content+="</table>"+ html_end
         f.write(content)
     os.startfile(fname)
@@ -152,11 +153,11 @@ def th_encode(sh):
         th_html+="</tr>"
     return i_mail,i_name,th_html
 
-#@td  员工工资条数据html格式--list
-#@prama sh   sheet对象
-#@prama i    邮箱的列号
-#@prama j    姓名的列号
-#@prama d    td数据存储容器
+#@ td  员工工资条数据html格式--list
+#@ sh   sheet对象
+#@ i    邮箱的列号
+#@ j    姓名的列号
+#@ d    td数据存储容器
 def td_encode(sh,i,j,d):
     nrows=sh.nrows
     for n in range(1,nrows):
@@ -178,25 +179,25 @@ def td_encode(sh,i,j,d):
 
 #@i_name  姓名的列号
 #@i_mail  邮箱的列号
-#@th_sign 标题栏分析状态（0：完成 1：未进行）
+#@th_sign 标题栏分析状态（0：未进行 1：完成）
 #@th_html 标题栏html的table格式
 #@td_dhtml  员工工资条数据html格式--list
 def readXLS(fname):
-    th_sign=1
+    th_sign=0
     bk=xlrd.open_workbook(fname)
     shname=bk.sheet_names()
     for s in shname:
         # -- 工资条标题栏生成 --
         if "部" in s: 
             sh=bk.sheet_by_name(s)
-            if th_sign: #生成标题栏
+            if not(th_sign): #生成标题栏
                 th.extend(th_encode(sh))
                 # print("th=",th,"\n")
-                th_sign=0
-                print(("%-20s"%"....工资条标题栏"),"OK！")
+                th_sign=1
+                print("%-20s%s"%("....标题栏","OK！"))
             d[s]=[]
             td_encode(sh,th[0],th[1],d[s]) # 生成工资数据
-    print(("%-22s"%"....工资数据"),"OK！")
+    print("%-20s%s"%("....工资数据","OK！"))
 ##            break               
 def setGlobal():
     global conf,html_head,html_end,q,lock,errAccount
@@ -204,20 +205,22 @@ def setGlobal():
     html_head='''<html>
             <head>
             <meta charset="GBK">
+            <title>工资条预览</title>
             <style type="text/css">
             #mainbox {margin:5 auto;}
+            .msg{text-align:right;}
             table {border-collapse:collapse;width:88%;margin:0 auto;}
             table,tr,th,td {
                 border:1px solid #000;
                 text-align:center;
-                    }
+                }
             th{background-color:#eee}
 
             </style>
             </head>
             <body>
             <div id="mainbox">'''
-    html_end='''    </div>
+    html_end='''</div>
             </body>
             </html>'''
     q=queue.Queue()
@@ -236,7 +239,8 @@ def SetConf():
     if os.path.exists(fname):#确认配置文件存在，则读取配置
         cf.read(fname)
         conf['from']=cf.get('smtpset','from')
-        conf['pwd']=cryptcode(cf.get('smtpset','pwd'),1)
+        conf['pwd']=cf.get('smtpset','pwd')
+        # conf['pwd']=cryptcode(cf.get('smtpset','pwd'),1)
         conf['smtp']=cf.get('smtpset','smtp')
     else:
         conf['from']=input("请设置发送邮箱：")
@@ -244,7 +248,8 @@ def SetConf():
         conf['smtp']=input("请设置SMTP：")    
         cf.add_section("smtpset")#增加section 
         cf.set("smtpset", "from", conf["from"])#增加option 
-        cf.set("smtpset", "pwd", cryptcode(conf["pwd"])) 
+        cf.set("smtpset", "pwd", conf["pwd"])
+        # cf.set("smtpset", "pwd", cryptcode(conf["pwd"])) 
         cf.set("smtpset", "smtp", conf["smtp"])  
         with open(fname, "w") as f: 
             cf.write(f)#写入配置文件文件中   
@@ -257,30 +262,39 @@ def SetConf():
         conf['subject']='%s年%02d月工资条'%(int(sub[:4])-1,12)
 
     conf['fxls']=''
-    while conf['fxls']=='':
-        conf['fxls']=input('请输入工资表格文件：').lower()
+    prein="请输入"
+    while conf['fxls']=='': 
+        conf['fxls']=input("%s%s"%(prein,'工资表格文件：')).lower()
         if not(re.match(r'.*\.xls(x?)$',conf['fxls'])):
             conf['fxls']=''
-    print('    *--*--*--*--*--*--*--*--*--*--*--*--*')
-    print('    |  配置信息如下：')
-    print('    |  发送邮箱：%s'%conf['from'])
-    print('    |  SMTP服务器：%s'%conf['smtp'])
-    print('    |  工资条表格文件：%s'%conf['fxls'])
-    print('    |  邮件标题：%s'%conf['subject'])
-    print('    *--*--*--*--*--*--*--*--*--*--*--*--*')
+        elif not(os.path.exists(conf["fxls"])):
+            prein=("%s文件不存在!\n请重新输入"%conf["fxls"])
+            conf["fxls"]=""
+            
+            
+    print("*"*50)
+    print("%-10s"%'配置信息如下：')
+    print("%-10s%s"%('发送邮箱：',conf['from']))
+    print("%-10s%s"%('SMTP服务器：',conf['smtp']))
+    print("%-10s%s"%('工资条表格文件：',conf['fxls']))
+    print("%-10s%s"%('邮件标题：',conf['subject']))
+    print("*"*50)
     return conf
-    
+def loginTest(conf):
+    pass
+    # server.login
 
 def iSelect():
     conf['cmd']=''
     inbox='浏览工资条(B)/'
-    print("%-30s"%'    *--*--*--*--*--*--*--*--*--*--*--*--*')
+    print("*"*50)
     while not(conf['cmd']): 
-        conf['cmd']=input(inbox+'发送邮件(S)/退出(Q):').lower()
+        conf['cmd']=input(inbox+'发送邮件(S)/退出(Q):').strip().lower()
         if conf['cmd']=='b':
             cmdBrow()
+            time.sleep(2)
             inbox='重新浏览工资条(B)/'
-            print("%-30s"%'    *--*--*--*--*--*--*--*--*--*--*--*--*')
+            print(".\n"*2)
             conf['cmd']=''
         elif conf['cmd']=='q':
             sys.exit()
@@ -296,6 +310,7 @@ def cmdBrow():
 # -- 发送工资条 --            
 def cmdSend():
     # print("Send mail is begining……")
+    print(".\n"*2)
     print("开始发送电子邮件……")
     # --工资条邮件生成 --
     for k in d:
@@ -303,11 +318,15 @@ def cmdSend():
                 data=Msg_encode(conf,th[2],th[0],v)
                 q.put(data)
     # -- 工资条邮件多线程发送 --
-    Consumer=[Sender() for i in range(4)]
+    Consumer=[Sender(conf,lock,q,errAccount) for i in range(4)]
     start=time.time() #计时开始
     for c in Consumer:
         c.daemon = True
         c.start()
+    # -- 单线程测试 --
+##    Consumer=Sender(conf,lock,q,errAccount)
+##    Consumer.daemon=True
+##    Consumer.start()
     q.join()
 
     # -- 发送完毕，输出结果 --
@@ -323,17 +342,19 @@ def cmdSend():
 if __name__ == '__main__':
     setGlobal()
     if not(conf):
-        setConf()
+        conf=SetConf()
     pay_label="" #标题栏数据,默认为空
     i_height=1  #标题栏行高，默认为1
-    fname=r"d:\code\js\123.xls"
+##    fname=r"d:\code\js\123.xls"
+    fname=conf["fxls"]
     th=[]
     d={}  #@工资数据
     # print("Data analysis is begining……")
     print("数据分析开始……")
     readXLS(fname)
     # print("Data analysis is completed！")
-    iSelect("数据分析完毕。")
+    print("数据分析完毕。")
+    iSelect()
     
        
 

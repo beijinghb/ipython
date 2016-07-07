@@ -1,6 +1,7 @@
 #-*- coding: utf8 -*-
-# Version 0.5
 #配置smtp信息，发送工资条邮件
+#v1.1 指定sheet包含“部”，并要求工资条标题栏是整个xls文件都统一标准
+#v1.2 通过首列的“序号”，以及“序号”所在行是否包含“邮箱”来判断是否为工资条sheet，且工资条标题栏要单个sheet统一标准即可
 
 from email import encoders
 from email.header import Header
@@ -19,7 +20,6 @@ def _format_addr(s): #格式化邮件信息
 #@lock   锁
 #@queue  队列数据需包含2个元素(sendto,msg)
 #@errAccount  无法发送的邮件账号，需要传入变量名
-
 class Sender(threading.Thread): #发送邮件--线程类对象
     def __init__(self,conf,lock,queue,errAccount):
         self.conf=conf
@@ -65,11 +65,11 @@ def Ldump(*txt):
     lock.release()
 
 
-
-def Msg_encode(conf,th,i,td):
-    # print("td=",td)
+#@conf 配置
+#@td   td=td[0]:email ,td[1]:name,td[2]=td.data  
+def Msg_encode(conf,td):
     content=html_head+"<table>"
-    content+=th+td[2]
+    content+=td[2]
     content+="</table>"+html_end
     msg = MIMEText(content, 'html', 'utf-8')
     msg['From'] = _format_addr('财务 <%s>' % conf['from'])
@@ -78,127 +78,130 @@ def Msg_encode(conf,th,i,td):
     return td[0],msg
     
 
-def htmlFile(th,d):
-    # print("htmlFile: th=",th)
+def htmlFile(d):
     fname=r"payroll.html"
     if os.path.exists(fname):
         os.remove(fname) 
     with open(fname,'w') as f:
         content=html_head+"<table>"
-        for k in d:
-            for x in d[k]:
+        for k,v in d.items():
+            for x in v:
                 check='''<caption class='msg'>TO:%s-%s<input type="checkbox" style="vertical-align:middle;" ></caption>'''%(x[0],k)
-                content+=check+th[2]+x[2]+"</table><br/><br/><table>"
+                content+=check+x[2]+"</table><br/><br/><table>"
         content+="</table>"+ html_end
         f.write(content)
     os.startfile(fname)
     
 
 
-#@i_row   工资条标题栏起始行号
-#@i_name  姓名的列号
-#@i_mail  邮箱的列号
+#@rowIndex   工资条标题栏起始行号
+#@colName  姓名的列号
+#@colMail  邮箱的列号
 #@lab     标题栏数据--list（首行，次行）
 #@d_lab   标题栏数据--dict（合并的列数，行数）
+#@d       本sheet工资条数据
 def th_encode(sh):
     cv=sh.col_values(0)
-    i_row=cv.index('序号') #  工资条标题栏的行号
-    rv=sh.row_values(i_row)
-    i_name=rv.index("姓名")  #  工资条标题栏：姓名的列号
-    i_mail=rv.index("邮箱") #  工资条标题栏：邮箱的列号
+    if "序号" in cv:
+        rowIndex=cv.index('序号') #工资条标题栏的行号
+        rv=sh.row_values(rowIndex) #rv 获取“序号”所在行的values
+        d_lab={} #{"姓名"：[0,1],...} 姓名占n+0列、n+1行(n=1)
+        lab=([],[]) #lab= (['姓名', '基本工资', '岗位工资', '绩效工资', ..., '银行发放'], [])
+        if "邮箱" in rv:
+            colName=rv.index("姓名")  #  工资条标题栏：姓名的列号
+            colMail=rv.index("邮箱") #  工资条标题栏：邮箱的列号
+            # -- 标题栏首行数据 --
 
-    # -- 标题栏首行数据 --
-    d_lab={}
-    lab=([],[]) 
-    rv.reverse()
-    t=0
-    for x in rv:
-        if x:
-            d_lab[x]=([t,0])
-            lab[0].append(x)
+            rv.reverse()
             t=0
-            
+            for x in rv:
+                if x:
+                    d_lab[x]=([t,0])
+                    lab[0].append(x)
+                    t=0          
+                else:
+                    t+=1
+            lab[0].reverse()
+            lab[0].remove("邮箱") #删除 mail
+            lab[0].remove("序号") #删除 序号
+
+            # -- 标题栏次行数据 --
+            # print(sh.cell_value(rowIndex+1,1))
+            if not(sh.cell_value(rowIndex+1,0)): #如果不为空，标题栏为2行
+                rv2=sh.row_values(rowIndex+1)
+                # rv2.pop(colMail)
+                # rv2.pop(0)
+                for i,x in enumerate(rv2):
+                    if x:
+                        lab[1].append(x)
+                    else: # -- 统计占两行的标题栏 --
+                        v=sh.cell_value(rowIndex,i)
+                        if v in lab[0]:
+                            d_lab[v][1]=1
+
+            # -- 生成标题栏的html --
+            th_html="<tr>"
+            for x in lab[0]:
+                th_html+="<th "
+                if d_lab[x][0]:
+                    th_html+="colspan="+str(d_lab[x][0]+1)
+                if d_lab[x][1]:
+                    th_html+="rowspan="+str(d_lab[x][1]+1)
+                th_html+=">"+x+"</th>"
+            th_html+="</tr>"
+            if lab[1]:
+                th_html+="<tr>"
+                for x in lab[1]:
+                    th_html+="<th>"+x+"</th>"
+                th_html+="</tr>"
+            return colMail,colName,th_html
         else:
-            t+=1
-    lab[0].reverse()
-    lab[0].remove("邮箱")
-    lab[0].remove("序号")
-
-    # -- 标题栏次行数据 --
-    # print(sh.cell_value(i_row+1,1))
-    if sh.cell_value(i_row+1,0): #如果不为空，标题栏为2行
-        pass
+            return False
     else:
-        rv2=sh.row_values(i_row+1)
-        for i,x in enumerate(rv2):
-            if x:
-                lab[1].append(x)
-            else: # -- 统计占两行的标题栏 --
-                v=sh.cell_value(i_row,i)
-                d_lab[v][1]=1
-    th_html="<tr>"
-
-    for x in lab[0]:
-        th_html+="<th "
-        if d_lab[x][0]:
-            th_html+="colspan="+str(d_lab[x][0]+1)
-        if d_lab[x][1]:
-            th_html+="rowspan="+str(d_lab[x][1]+1)
-        th_html+=">"+x+"</th>"
-    th_html+="</tr>"
-    if lab[1]:
-        th_html+="<tr>"
-        for x in lab[1]:
-            th_html+="<th>"+x+"</th>"
-        th_html+="</tr>"
-    return i_mail,i_name,th_html
-
-#@ td  员工工资条数据html格式--list
-#@ sh   sheet对象
-#@ i    邮箱的列号
-#@ j    姓名的列号
-#@ d    td数据存储容器
-def td_encode(sh,i,j,d):
+        return False
+    
+#@td  员工工资条数据html--list
+#@sh   sheet对象
+#@i    邮箱的列号
+#@j    姓名的列号
+#@d    td数据存储容器
+def td_encode(sh,i,j,th):
+    d=[]  #{"sheetname":[["mail","name","td.data"],……],……}
     nrows=sh.nrows
-    for n in range(1,nrows):
+    for n in range(nrows):
         rv=sh.row_values(n)
         mail=rv[i]
-        data=[]
+        data=[] #data=["test@123.com","name","td.data"]
         if isinstance(mail,str) and re.match(r'^(\w+[\-\.]?\w+)@(\w+\-?\w+)(\.\w+)$',mail.strip()):
-            td="<tr><td>"+rv[j]+"</td>"
-            data.append(mail)
-            rv.pop(i)
-            rv.pop(0)
-            data.append(rv[0])
-            for y in rv[1:]:
+            data.append(mail)  #append  email
+            data.append(rv[j])  #append  name
+            td="<tr>"
+            rv.pop(i)  #pop email
+            rv.pop(0)  #pop 序号
+            for y in rv:
                 td+="<td>"+("%s"%y)+"</td>"
             td+="</tr>"
-            data.append(td)
+            tab=th+td
+            data.append(tab)
             d.append(data)
+    return d
     
 
-#@i_name  姓名的列号
-#@i_mail  邮箱的列号
-#@th_sign 标题栏分析状态（0：未进行 1：完成）
+#@colName  姓名的列号
+#@colMail  邮箱的列号
+#@th_sign 标题栏分析状态（0：未进行 1：完成）--
 #@th_html 标题栏html的table格式
 #@td_dhtml  员工工资条数据html格式--list
 def readXLS(fname):
-    th_sign=0
+    # th_sign=0
     bk=xlrd.open_workbook(fname)
     shname=bk.sheet_names()
     for s in shname:
-        # -- 工资条标题栏生成 --
-        if "部" in s: 
-            sh=bk.sheet_by_name(s)
-            if not(th_sign): #生成标题栏
-                th.extend(th_encode(sh))
-                # print("th=",th,"\n")
-                th_sign=1
-                print("%-20s%s"%("....标题栏","OK！"))
-            d[s]=[]
-            td_encode(sh,th[0],th[1],d[s]) # 生成工资数据
-    print("%-20s%s"%("....工资数据","OK！"))
-##            break               
+        sh=bk.sheet_by_name(s)
+        th=th_encode(sh)
+        if th:
+            d[s]=td_encode(sh,*th)
+            print("%3s%1s%s"%("√","",sh.name))            
 def setGlobal():
     global conf,html_head,html_end,q,lock,errAccount
     conf={}
@@ -231,7 +234,7 @@ def SetConf():
     fname="payroll.cfg"
     print('        *--*--*--*--*--*--*--*--*--*--*--*--*')
     print('        |                                   |')
-    print('    ----|       工资条发送程序                |----')
+    print('    ----|       工资条发送程序              |----')
     print('        |                                   |')
     print('        *--*--*--*--*--*--*--*--*--*--*--*--*')
     conf={}
@@ -273,7 +276,7 @@ def SetConf():
             
             
     print("*"*50)
-    print("%-10s"%'配置信息如下：')
+    print("%s%-10s%s"%("*"*8,'配置信息如下：',"*"*8))
     print("%-10s%s"%('发送邮箱：',conf['from']))
     print("%-10s%s"%('SMTP服务器：',conf['smtp']))
     print("%-10s%s"%('工资条表格文件：',conf['fxls']))
@@ -305,7 +308,7 @@ def iSelect():
 
 # -- 浏览数据 --
 def cmdBrow():
-    htmlFile(th,d)
+    htmlFile(d)
 
 # -- 发送工资条 --            
 def cmdSend():
@@ -313,10 +316,10 @@ def cmdSend():
     print(".\n"*2)
     print("开始发送电子邮件……")
     # --工资条邮件生成 --
-    for k in d:
-        for v in d[k]:
-                data=Msg_encode(conf,th[2],th[0],v)
-                q.put(data)
+    for k,v in d.items():
+        for x in v:
+            data=Msg_encode(conf,x)
+            q.put(data)
     # -- 工资条邮件多线程发送 --
     Consumer=[Sender(conf,lock,q,errAccount) for i in range(4)]
     start=time.time() #计时开始
